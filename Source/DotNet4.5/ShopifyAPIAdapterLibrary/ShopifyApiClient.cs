@@ -1,4 +1,5 @@
-﻿using System;
+﻿using Newtonsoft.Json.Linq;
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Configuration;
@@ -75,6 +76,8 @@ namespace ShopifyAPIAdapterLibrary
                 }
             }
 
+            
+
 
             if(!string.IsNullOrEmpty(ApiVersion) && !path.Contains("/api/") && !path.Contains("/oauth/")) {
                 path = path.Replace("/admin/", "/admin/api/" + ApiVersion + "/");
@@ -83,11 +86,32 @@ namespace ShopifyAPIAdapterLibrary
             //reset api version
             ApiVersion = "";
 
+            if(ConfigurationManager.AppSettings["ShopifyApiLogAll"] == "true")
+            {
+                var logFile = HttpContext.Current.Server.MapPath("~/apicalls.txt");
+
+                //File.AppendAllText(logFile, DateTime.Now.ToString() + " " + method.ToString() + " " + path + "\r\n");
+            }
+
             string url = String.Format("https://{0}.myshopify.com{1}", State.ShopName, path);
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
             request.ContentType = GetRequestContentType();
+
+            if (method == HttpMethods.GRAPHQL_POST && callParams.GetType() != typeof(JObject))
+            {
+                request.ContentType = "application/graphql";
+                request.Method = "POST";
+            } else if (method == HttpMethods.GRAPHQL_POST) {
+                request.ContentType = "application/json";
+                request.Method = "POST";
+            } else 
+            {
+                request.Method = method.ToString();
+            }
+            
+
             request.Headers.Add("X-Shopify-Access-Token", this.State.AccessToken);
-            request.Method = method.ToString();
+
 
             if (callParams != null)
             {
@@ -129,6 +153,20 @@ namespace ShopifyAPIAdapterLibrary
                             }
                         }
                     }
+                } else if (method == HttpMethods.GRAPHQL_POST)
+                {
+                    //add the requst body to the request stream
+                    if (!String.IsNullOrEmpty(callParams.ToString()))
+                    {
+                        using (var ms = new MemoryStream())
+                        {
+                            using (var writer = new StreamWriter(request.GetRequestStream()))
+                            {
+                                writer.Write(callParams.ToString());
+                                writer.Close();
+                            }
+                        }
+                    }
                 }
             }
 
@@ -140,53 +178,59 @@ namespace ShopifyAPIAdapterLibrary
                 var response = (HttpWebResponse)request.GetResponse();
                 string result = null;
                 
-                string limit = response.GetResponseHeader("HTTP_X_SHOPIFY_SHOP_API_CALL_LIMIT");
-                HttpContext.Current.Items["HTTP_X_SHOPIFY_SHOP_API_CALL_LIMIT"] = limit;
-
-                double percent = Convert.ToDouble(limit.Split('/')[0]) / Convert.ToDouble(limit.Split('/')[1]);
-
-                //cursor paging
-                string linkHeader = response.GetResponseHeader("LINK");
-                
-                
-                HttpContext.Current.Items["PAGING_LINK"] = "";
-                HttpContext.Current.Items["PAGING_LINK_PREV"] = "";
-
-                if (!string.IsNullOrEmpty(linkHeader))
+                if(method != HttpMethods.GRAPHQL_POST)
                 {
-                    var relNext = linkHeader.Split(',').ToList().Where(x => x.Contains("rel=\"next\"")).FirstOrDefault();
+                    string limit = response.GetResponseHeader("HTTP_X_SHOPIFY_SHOP_API_CALL_LIMIT");
+                    HttpContext.Current.Items["HTTP_X_SHOPIFY_SHOP_API_CALL_LIMIT"] = limit;
 
-                    if(!string.IsNullOrEmpty(relNext))
+                    double percent = Convert.ToDouble(limit.Split('/')[0]) / Convert.ToDouble(limit.Split('/')[1]);
+
+                    //cursor paging
+                    string linkHeader = response.GetResponseHeader("LINK");
+
+
+                    HttpContext.Current.Items["PAGING_LINK"] = "";
+                    HttpContext.Current.Items["PAGING_LINK_PREV"] = "";
+
+                    //graphql returns paging / throttle info right in the response
+                    if (!string.IsNullOrEmpty(linkHeader))
                     {
-                        var tempUrl = relNext.Trim().Split('>')[0].Replace("<", "");
-                        
-                        string pageInfo = HttpUtility.ParseQueryString(new Uri(tempUrl).Query)["page_info"];
+                        var relNext = linkHeader.Split(',').ToList().Where(x => x.Contains("rel=\"next\"")).FirstOrDefault();
 
-                        if(!string.IsNullOrEmpty(pageInfo))
+                        if (!string.IsNullOrEmpty(relNext))
                         {
-                            HttpContext.Current.Items["PAGING_LINK"] = pageInfo;
-                        }
-                        
-                    }
+                            var tempUrl = relNext.Trim().Split('>')[0].Replace("<", "");
 
-                    var relPrev = linkHeader.Split(',').ToList().Where(x => x.Contains("rel=\"previous\"")).FirstOrDefault();
+                            string pageInfo = HttpUtility.ParseQueryString(new Uri(tempUrl).Query)["page_info"];
 
-                    if (!string.IsNullOrEmpty(relPrev))
-                    {
-                        var tempUrl = relPrev.Trim().Split('>')[0].Replace("<", "");
+                            if (!string.IsNullOrEmpty(pageInfo))
+                            {
+                                HttpContext.Current.Items["PAGING_LINK"] = pageInfo;
+                            }
 
-                        string pageInfo = HttpUtility.ParseQueryString(new Uri(tempUrl).Query)["page_info"];
-
-                        if (!string.IsNullOrEmpty(pageInfo))
-                        {
-                            HttpContext.Current.Items["PAGING_LINK_PREV"] = pageInfo;
                         }
 
+                        var relPrev = linkHeader.Split(',').ToList().Where(x => x.Contains("rel=\"previous\"")).FirstOrDefault();
+
+                        if (!string.IsNullOrEmpty(relPrev))
+                        {
+                            var tempUrl = relPrev.Trim().Split('>')[0].Replace("<", "");
+
+                            string pageInfo = HttpUtility.ParseQueryString(new Uri(tempUrl).Query)["page_info"];
+
+                            if (!string.IsNullOrEmpty(pageInfo))
+                            {
+                                HttpContext.Current.Items["PAGING_LINK_PREV"] = pageInfo;
+                            }
+
+                        }
+
+
                     }
-
-
+                    //end cursor paging
                 }
-                //end cursor paging
+
+
 
 
                 //WriteToLog(HttpContext.Current.Request.ServerVariables["REMOTE_ADDR"] + ", " + ((int)response.StatusCode).ToString() + ", " + method + ", " + path + " Percent: " + percent + ", HTTP_X_SHOPIFY_SHOP_API_CALL_LIMIT:" + response.GetResponseHeader("HTTP_X_SHOPIFY_SHOP_API_CALL_LIMIT"));
@@ -289,6 +333,27 @@ namespace ShopifyAPIAdapterLibrary
             return Call(HttpMethods.POST, path, data, 0);
         }
 
+
+        public object GraphQLPost(string query, JObject variables = null, string operationName = "")
+        {
+            if(variables != null)
+            {
+                JObject data = new JObject();
+                data["operationName"] = operationName;
+                data["query"] = query;
+                data["variables"] = variables;
+                
+
+                return Call(HttpMethods.GRAPHQL_POST, "/admin/api/graphql.json", data, 0);
+            } else
+            {
+
+                //always at same path afaik
+                return Call(HttpMethods.GRAPHQL_POST, "/admin/api/graphql.json", query, 0);
+            }
+
+        }
+
         /// <summary>
         /// Make a Put method HTTP request to the Shopify API
         /// </summary>
@@ -329,6 +394,7 @@ namespace ShopifyAPIAdapterLibrary
         {
             GET,
             POST,
+            GRAPHQL_POST,
             PUT,
             DELETE
         }
